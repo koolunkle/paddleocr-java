@@ -1,0 +1,55 @@
+plugins {
+    id 'java'
+    id 'org.springframework.boot' version '3.2.2'
+    id 'io.spring.dependency-management' version '1.1.4'
+}
+
+group = 'com.example'
+version = '0.0.1-SNAPSHOT'
+
+java {
+    sourceCompatibility = '17'
+}
+
+configurations {
+    compileOnly {
+        extendsFrom annotationProcessor
+    }
+}
+
+repositories {
+    mavenCentral()
+}
+
+dependencies {
+    implementation 'org.springframework.boot:spring-boot-starter-web'
+    implementation 'org.springframework.boot:spring-boot-starter-validation'
+    implementation 'org.springdoc:springdoc-openapi-starter-webmvc-ui:2.3.0'
+
+    // RapidOCR
+    implementation 'io.github.mymonstercat:rapidocr:0.0.7'
+    implementation 'io.github.mymonstercat:rapidocr-onnx-platform:0.0.7'
+
+    // ONNX Runtime (for Layout/Table models)
+    implementation 'com.microsoft.onnxruntime:onnxruntime:1.16.3'
+
+    // TIFF Image Support
+    implementation 'com.twelvemonkeys.imageio:imageio-tiff:3.10.1'
+
+    // OpenCV (OpenPnP)
+    implementation 'org.openpnp:opencv:4.9.0-0'
+
+    // Fuzzy (Approximate String) Matching
+    implementation 'org.apache.commons:commons-text:1.10.0'
+
+    // Object Pooling (for InferenceEngine)
+    implementation 'org.apache.commons:commons-pool2:2.12.0'
+
+    annotationProcessor 'org.springframework.boot:spring-boot-configuration-processor'
+    testImplementation 'org.springframework.boot:spring-boot-starter-test'
+    testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
+}
+
+tasks.named('test') {
+    useJUnitPlatform()
+}

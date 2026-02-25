@@ -1,0 +1,121 @@
+# ========================================================================
+# 1. Spring Boot 인프라 설정
+# ========================================================================
+spring:
+  servlet:
+    multipart:
+      # 대용량 이미지 및 다중 페이지 PDF/TIFF 처리를 위한 파일 업로드 용량 제한 해제
+      max-file-size: 300MB
+      max-request-size: 300MB
+
+# ========================================================================
+# 2. API 문서화 설정
+# ========================================================================
+springdoc:
+  api-docs:
+    path: /v3/api-docs
+  swagger-ui:
+    path: /swagger-ui.html
+    try-it-out-enabled: true
+    operations-sorter: alpha
+
+# ========================================================================
+# 3. 로깅 정책 설정
+# ========================================================================
+logging:
+  level:
+    root: INFO
+    "[com.example.ocr]": DEBUG
+    "[org.springframework.web]": INFO
+    # 외부 JNI/네이티브 라이브러리의 불필요한 로그를 억제하여 콘솔 노이즈 최소화
+    "[com.benjaminwan.ocrlibrary]": ERROR
+    "[io.github.mymonstercat]": ERROR
+  pattern:
+    console: "%d{yyyy-MM-dd HH:mm:ss} [%thread] %-5level %logger{36} - %msg%n"
+
+# ========================================================================
+# 4. 애플리케이션 설정 (AppProperties.java 바인딩)
+# ========================================================================
+ocr:
+  # ----------------------------------------------------------------------
+  # 4-1. 추론 엔진 핵심 파라미터 (engine)
+  # ----------------------------------------------------------------------
+  engine:
+    max-detection-side-length: 1280
+    detection-score-threshold: 0.3
+    box-score-threshold: 0.5
+    detection-unclip-ratio: 1.6
+    use-classification: false
+    use-angle-correction: false
+    use-most-angle-correction: false
+    image-padding: 0
+    layout-score-threshold: 0.5
+
+  # ----------------------------------------------------------------------
+  # 4-2. 파싱 및 알고리즘 튜닝 (algo)
+  # ----------------------------------------------------------------------
+  algorithm:
+    line-merging-vertical-gap: 15
+    section-break-threshold: 100
+    fuzzy-match-similarity: 0.7
+    header-search-line-limit: 10
+    court-header-search-limit: 5
+    decision-header-search-offset: 4
+    line-sorting-y-tolerance: 12
+    debug-directory-cleanup-interval-ms: 3000
+    debug-output-dir: "vis"
+
+  # ----------------------------------------------------------------------
+  # 4-3. AI 모델 전/후처리 설정 (models)
+  # ----------------------------------------------------------------------
+  models:
+    layout-target-height: 800
+    layout-target-width: 608
+    imagenet-mean: [0.485, 0.456, 0.406]
+    imagenet-std: [0.229, 0.224, 0.225]
+    layout-expansion-margin: 0.10
+    layout-nms-threshold: 0.45
+
+  # ----------------------------------------------------------------------
+  # 4-4. 시스템 비동기 및 스레드 풀 설정 (async)
+  # ----------------------------------------------------------------------
+  async:
+    core-pool-size: 2
+    max-pool-size: 4
+    queue-capacity: 50
+    keep-alive-seconds: 60
+    inference-timeout-ms: 30000
+    wait-for-tasks-on-shutdown: true
+    shutdown-timeout-seconds: 60
+    sse-timeout-ms: 600000
+
+  # ----------------------------------------------------------------------
+  # 4-5. 보안 및 CORS 정책 (cors)
+  # ----------------------------------------------------------------------
+  cors:
+    allowed-origin-patterns: ["*"]
+    allowed-methods: ["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"]
+    allowed-headers: ["*"]
+    allow-credentials: true
+    max-age: 3600
+
+  # ----------------------------------------------------------------------
+  # 4-6. 시각화 디버그 이미지 설정 (visual)
+  # ----------------------------------------------------------------------
+  visual:
+    label-font-scale: 0.6
+    label-thickness: 2
+    label-y-offset: 10
+    label-min-y: 20
+
+  # ----------------------------------------------------------------------
+  # 4-7. API 문서 메타데이터 (documents)
+  # ----------------------------------------------------------------------
+  documents:
+    title: "OCR Service API"
+    description: "Document Structure Analysis & Text Extraction Engine"
+    version: "1.0.0"
+    local-url: "http://localhost:8080"
+    local-description: "Local Development Server"
+    current-url: "/"
+    current-description: "Active Environment"
