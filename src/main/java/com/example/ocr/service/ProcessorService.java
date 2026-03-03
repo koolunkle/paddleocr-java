@@ -171,16 +171,51 @@ public class ProcessorService {
         try {
             OcrResult ocrResult = this.inferenceEngine.runOcr(imagePath, this.paramConfig);
             List<LayoutService.LayoutRegion> layoutRegions = this.layoutService.detectRegions(imageMat, this.appProperties.engine().layoutScoreThreshold());
-            
-            this.visualService.saveLayoutDebug(imageMat, pageNumber, documentName, layoutRegions);
-            
-            AnalysisResponse.PageResult finalResult = buildPageResult(pageNumber, ocrResult, imageMat, documentName, layoutRegions);
+
+            // OCR 결과를 바탕으로 레이아웃 영역의 박스를 실제 텍스트 라인에 맞게 보정
+            List<LayoutService.LayoutRegion> adjustedRegions = adjustLayoutRegions(layoutRegions, ocrResult.getTextBlocks());
+            this.visualService.saveLayoutDebug(imageMat, pageNumber, documentName, adjustedRegions);
+
+            AnalysisResponse.PageResult finalResult = buildPageResult(pageNumber, ocrResult, imageMat, documentName, adjustedRegions);
             this.resultLogger.logPageResult(finalResult);
             
             return finalResult;
         } finally {
             this.concurrencyLimitSemaphore.release();
         }
+    }
+
+    /**
+     * 레이아웃 모델이 예측한 원본 박스를 실제 포함된 OCR 텍스트 블록들의 전체 영역을 아우르는 최종 박스로 재계산(보정)합니다.
+     */
+    private List<LayoutService.LayoutRegion> adjustLayoutRegions(List<LayoutService.LayoutRegion> regions, List<TextBlock> textBlocks) {
+        if (textBlocks == null || textBlocks.isEmpty()) {
+            return regions;
+        }
+
+        return regions.stream().map(region -> {
+            // 해당 레이아웃 영역 내에 중심점이 포함된 텍스트 블록 필터링
+            List<Rectangle> innerRects = textBlocks.stream()
+                    .filter(block -> region.rect().contains(calculateCenterPoint(block.getBoxPoint())))
+                    .map(this::convertToAwtRectangle)
+                    .toList();
+
+            // 포함된 텍스트가 없으면 원본 유지
+            if (innerRects.isEmpty()) {
+                return region;
+            }
+
+            // 모든 텍스트 블록을 포함하는 최소 외접 사각형 계산 (Rectangle::union 활용)
+            Rectangle adjustedRect = innerRects.stream().reduce(Rectangle::union).orElse(region.rect());
+
+            // 표(Table) 타입인 경우, 테두리 보존을 위해 원본 박스와 텍스트 박스의 합집합(Union) 사용
+            if (LayoutType.fromCode(region.type()).isTable()) {
+                adjustedRect = region.rect().union(adjustedRect);
+            }
+
+            // 기존 객체의 불변성을 유지하며 새로운 rect를 가진 Region 생성
+            return new LayoutService.LayoutRegion(region.type(), adjustedRect, region.score());
+        }).toList();
     }
 
     private AnalysisResponse.PageResult buildPageResult(int pageNumber, OcrResult ocrResult, Mat imageMat, String documentName, List<LayoutService.LayoutRegion> layoutRegions) {
