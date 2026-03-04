@@ -17,6 +17,7 @@ import org.opencv.core.Mat;
 import org.opencv.core.Point;
 import org.opencv.core.Rect;
 import org.opencv.core.Scalar;
+import org.opencv.core.Size;
 import org.opencv.imgcodecs.Imgcodecs;
 import org.opencv.imgproc.Imgproc;
 import org.slf4j.Logger;
@@ -185,22 +186,38 @@ public class VisualService {
      */
     private void drawTextLabel(Mat canvas, LayoutService.LayoutRegion region, Scalar color) {
         String labelText = LABEL_FORMAT.formatted(region.type(), region.score());
-        
-        // 라벨이 이미지 위쪽 경계를 벗어나지 않도록 Y 좌표 조정
-        double adjustedY = Math.max(
-                this.appProperties.visual().labelMinY(), 
-                region.rect().y - this.appProperties.visual().labelYOffset()
-        );
-        Point position = new Point(region.rect().x, adjustedY);
-        
+        int font = Imgproc.FONT_HERSHEY_SIMPLEX;
+        double scale = this.appProperties.visual().labelFontScale();
+        int thickness = this.appProperties.visual().labelThickness();
+        int[] baseline = new int[1];
+
+        // 1. 텍스트 크기 및 전체 라벨 높이 계산
+        Size textSize = Imgproc.getTextSize(labelText, font, scale, thickness, baseline);
+        int labelHeight = (int) textSize.height + baseline[0];
+        int labelWidth = (int) textSize.width;
+
+        // 2. 배치 위치 결정 (기본값: 박스 좌상단)
+        // 이미지 상단 공간이 부족하면 박스 내부 상단에 배치하여 겹침 방지
+        int x = region.rect().x;
+        boolean hasSpaceAbove = region.rect().y >= labelHeight;
+        int baseY = hasSpaceAbove ? region.rect().y : region.rect().y + labelHeight;
+
+        Point boxTopLeft = new Point(x, baseY - labelHeight);
+        Point boxBottomRight = new Point(x + labelWidth, baseY);
+        Point textOrigin = new Point(x, baseY - baseline[0]);
+
+        // 3. 배경 박스 그리기 
+        Imgproc.rectangle(canvas, boxTopLeft, boxBottomRight, color, -1);
+
+        // 4. 텍스트 출력
         Imgproc.putText(
                 canvas, 
                 labelText, 
-                position, 
-                Imgproc.FONT_HERSHEY_SIMPLEX, 
-                this.appProperties.visual().labelFontScale(), 
-                color, 
-                this.appProperties.visual().labelThickness(), 
+                textOrigin, 
+                font, 
+                scale, 
+                new Scalar(255, 255, 255), 
+                thickness, 
                 Imgproc.LINE_AA
         );
     }
@@ -276,7 +293,13 @@ public class VisualService {
      */
     private String sanitizeFileName(String fileName) {
         return Optional.ofNullable(fileName)
-                .map(name -> name.replaceAll(AppConstants.INVALID_CHARS, AppConstants.REPLACE_CHAR))
+                .map(name -> {
+                    // 확장자 제거 
+                    int lastDotIndex = name.lastIndexOf('.');
+                    String baseName = (lastDotIndex > 0) ? name.substring(0, lastDotIndex) : name;
+                    // 특수 문자 치환
+                    return baseName.replaceAll(AppConstants.INVALID_CHARS, AppConstants.REPLACE_CHAR);
+                })
                 .orElse(AppConstants.UNKNOWN);
     }
 }
