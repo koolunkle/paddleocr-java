@@ -11,13 +11,17 @@ public enum LayoutType implements Visualizable {
     // ========================================================================
     // 열거형 상수 
     // ========================================================================
-
-    TABLE   ("table",   Color.TABLE),
-    TEXT    ("text",    Color.TEXT),
-    TITLE   ("title",   Color.TITLE),
-    HEADER  ("header",  Color.GRAY),
-    FOOTER  ("footer",  Color.GRAY),
-    UNKNOWN ("unknown", Color.UNKNOWN);
+    TEXT           ("text",           Color.BLUE),
+    TITLE          ("title",          Color.GREEN),
+    FIGURE         ("figure",         Color.MAGENTA),
+    FIGURE_CAPTION ("figure_caption", Color.MAGENTA),
+    TABLE          ("table",          Color.RED),
+    TABLE_CAPTION  ("table_caption",  Color.RED),
+    HEADER         ("header",         Color.GRAY),
+    FOOTER         ("footer",         Color.GRAY),
+    REFERENCE      ("reference",      Color.ORANGE),
+    EQUATION       ("equation",       Color.CYAN),
+    UNKNOWN        ("unknown",        Color.UNKNOWN);
 
     // ========================================================================
     // 내부 데이터 구조 
@@ -28,11 +32,14 @@ public enum LayoutType implements Visualizable {
      * (OpenCV는 RGB가 아닌 BGR 순서를 사용함을 유의)
      */
     private static class Color {
-        static final double[] TABLE   = {0.0, 0.0, 255.0};     // Red
-        static final double[] TEXT    = {255.0, 0.0, 0.0};     // Blue
-        static final double[] TITLE   = {0.0, 255.0, 0.0};     // Green
-        static final double[] GRAY    = {128.0, 128.0, 128.0}; // Gray
-        static final double[] UNKNOWN = {255.0, 0.0, 255.0};   // Magenta
+        static final double[] BLUE    = {255.0, 0.0, 0.0};
+        static final double[] GREEN   = {0.0, 255.0, 0.0};
+        static final double[] RED     = {0.0, 0.0, 255.0};
+        static final double[] GRAY    = {128.0, 128.0, 128.0};
+        static final double[] MAGENTA = {255.0, 0.0, 255.0};
+        static final double[] ORANGE  = {0.0, 165.0, 255.0};
+        static final double[] CYAN    = {255.0, 255.0, 0.0};
+        static final double[] UNKNOWN = {200.0, 200.0, 200.0};
     }
 
     // ========================================================================
@@ -91,6 +98,6 @@ public enum LayoutType implements Visualizable {
      * 현재 레이아웃 타입이 표(Table) 영역인지 확인합니다.
      */
     public boolean isTable() { 
-        return this == TABLE; 
+        return this == TABLE || this == TABLE_CAPTION; 
     }
 }

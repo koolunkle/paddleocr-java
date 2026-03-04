@@ -3,6 +3,7 @@ package com.example.ocr.service;
 import java.awt.Rectangle;
 import java.nio.FloatBuffer;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collections;
 import java.util.Comparator;
 import java.util.HashMap;
@@ -31,8 +32,8 @@ import ai.onnxruntime.OrtSession;
 import jakarta.annotation.PreDestroy;
 
 /**
- * ONNX Runtime을 이용하여 이미지의 레이아웃(텍스트, 표, 그림 등) 영역을
- * 딥러닝 모델로 탐지하고 분석하는 서비스
+ * ONNX Runtime 기반 레이아웃 분석 서비스
+ * 문서 내 텍스트, 표, 그림 등의 영역을 딥러닝 모델로 탐지합니다.
  */
 @Service
 public class LayoutService {
@@ -75,6 +76,9 @@ public class LayoutService {
         this.onnxEnvironment = onnxEnvironment;
     }
 
+    /**
+     * 모델 로드 및 탐지 클래스 레이블 초기화
+     */
     public void init(String modelPath, List<String> dictionaryLabels) throws OrtException {
         if (this.onnxSession != null) {
             return;
@@ -109,36 +113,34 @@ public class LayoutService {
     // 공개 메서드 - 추론 파이프라인
     // ========================================================================
 
+    /**
+     * 이미지에서 레이아웃 영역을 탐지 (메인 파이프라인)
+     */
     public List<LayoutRegion> detectRegions(Mat sourceImage, float scoreThreshold) {
         if (this.onnxSession == null || sourceImage == null || sourceImage.empty()) {
             return Collections.emptyList();
         }
 
-        // MatResourceWrapper를 통해 생성된 메모리 자동 관리
         try (MatResourceWrapper wrapper = new MatResourceWrapper()) {
             int targetWidth = this.appProperties.models().layoutTargetWidth();
             int targetHeight = this.appProperties.models().layoutTargetHeight();
-            
-            double resizeScale = Math.min(
-                    (double) targetWidth / sourceImage.width(), 
-                    (double) targetHeight / sourceImage.height()
-            );
 
-            if (resizeScale <= 0) {
-                return Collections.emptyList();
-            }
+            // 입력 이미지 비율에 맞춰 스케일 계산 (Stretch Resize 대응)
+            float scaleX = (float) targetWidth / sourceImage.width();
+            float scaleY = (float) targetHeight / sourceImage.height();
 
             // 1. 전처리 (Preprocessing)
-            float[] inputTensorData = prepareInputTensor(sourceImage, targetWidth, targetHeight, resizeScale, wrapper);
-            
+            float[] inputTensorData = prepareInputTensor(sourceImage, targetWidth, targetHeight, wrapper);
+
             // 2. 추론 및 후처리 (Inference & Post-processing)
             return runPredictionAndPostProcess(
-                    inputTensorData, 
-                    sourceImage.width(), 
-                    sourceImage.height(), 
-                    resizeScale, 
-                    scoreThreshold, 
-                    targetWidth, 
+                    inputTensorData,
+                    sourceImage.width(),
+                    sourceImage.height(),
+                    scaleX,
+                    scaleY,
+                    scoreThreshold,
+                    targetWidth,
                     targetHeight
             );
 
@@ -152,30 +154,22 @@ public class LayoutService {
     // 비공개 메서드 - 전처리 (Preprocessing)
     // ========================================================================
 
-    private float[] prepareInputTensor(Mat sourceImage, int targetWidth, int targetHeight, double resizeScale, MatResourceWrapper wrapper) {
-        int scaledWidth = (int) Math.round(sourceImage.width() * resizeScale);
-        int scaledHeight = (int) Math.round(sourceImage.height() * resizeScale);
-
-        // 1. 리사이즈 생성
+    /**
+     * 입력 텐서 준비: 리사이즈, 정규화 및 평탄화(HWC -> CHW) 수행
+     */
+    private float[] prepareInputTensor(Mat sourceImage, int targetWidth, int targetHeight, MatResourceWrapper wrapper) {
+        // 1. Stretch 리사이즈 
         Mat resizedImage = wrapper.add(new Mat());
-        Imgproc.resize(sourceImage, resizedImage, new Size(scaledWidth, scaledHeight));
+        Imgproc.resize(sourceImage, resizedImage, new Size(targetWidth, targetHeight));
 
-        // 2. 패딩용 캔버스 생성 
-        Mat paddedCanvas = wrapper.add(new Mat(new Size(targetWidth, targetHeight), CvType.CV_32FC3, new Scalar(0, 0, 0)));
-        
-        // 3. 픽셀값 정규화 생성
+        // 2. 픽셀값 정규화 (1/255.0) 및 ImageNet 통계 적용
         Mat normalizedImage = wrapper.add(new Mat());
         resizedImage.convertTo(normalizedImage, CvType.CV_32FC3, PIXEL_NORMALIZATION_FACTOR);
 
-        // 4. 리사이즈된 이미지를 캔버스의 좌측 상단(ROI)에 복사
-        Mat regionOfInterest = wrapper.add(paddedCanvas.submat(0, scaledHeight, 0, scaledWidth));
-        normalizedImage.copyTo(regionOfInterest);
+        applyImageNetNormalization(normalizedImage);
 
-        // 5. ImageNet 평균 및 표준편차를 적용하여 정규화
-        applyImageNetNormalization(paddedCanvas);
-        
-        // 6. HWC -> CHW 평탄화 변환
-        return convertHwcToChwPlanar(paddedCanvas, targetWidth, targetHeight);
+        // 3. 텐서 구조 변환 (HWC -> CHW)
+        return convertHwcToChwPlanar(normalizedImage, targetWidth, targetHeight);
     }
 
     private void applyImageNetNormalization(Mat canvas) {
@@ -207,12 +201,13 @@ public class LayoutService {
     // ========================================================================
 
     private List<LayoutRegion> runPredictionAndPostProcess(
-            float[] inputTensorData, 
-            int originalWidth, 
-            int originalHeight, 
-            double resizeScale, 
+            float[] inputTensorData,
+            int originalWidth,
+            int originalHeight,
+            float scaleX,
+            float scaleY,
             float scoreThreshold,
-            int targetWidth, 
+            int targetWidth,
             int targetHeight) throws OrtException {
                 
         long[] inputShape = {BATCH_SIZE, RGB_CHANNELS, targetHeight, targetWidth};
@@ -228,24 +223,36 @@ public class LayoutService {
             for (Map.Entry<String, OnnxValue> entry : inferenceResult) {
                 OnnxTensor outputTensor = (OnnxTensor) entry.getValue();
                 long[] shape = outputTensor.getInfo().getShape();
-                
-                int anchorCount = (int) shape[1];
-                int featureDimension = (int) shape[2];
-                
-                float[] tensorValues = new float[anchorCount * featureDimension];
-                outputTensor.getFloatBuffer().get(tensorValues);
+                log.debug("[LayoutService] Output Node: {}, Shape: {}", entry.getKey(), Arrays.asList(shape));
 
-                if (featureDimension == DFL_DIMENSION) {
-                    boundingBoxMap.put(anchorCount, tensorValues);
-                } else {
-                    classScoreMap.put(anchorCount, tensorValues);
-                    channelDimensionMap.put(anchorCount, featureDimension);
+                // 1. NMS가 모델 내부에 포함된 경우
+                if ((shape.length == 3 && shape[2] == 6) || (shape.length == 2 && shape[1] == 6)) {
+                    int numDets = (int) (shape.length == 3 ? shape[1] : shape[0]);
+                    float[] tensorValues = new float[numDets * 6];
+                    outputTensor.getFloatBuffer().get(tensorValues);
+
+                    return processPostProcessedOutput(tensorValues, numDets, originalWidth, originalHeight, scaleX, scaleY, scoreThreshold);
+                }
+
+                // 2. Raw PicoDet 출력 (멀티스케일 피처 맵)
+                if (shape.length >= 3) {
+                    int anchorCount = (int) shape[1];
+                    int featureDimension = (int) shape[2];
+                    float[] tensorValues = new float[anchorCount * featureDimension];
+                    outputTensor.getFloatBuffer().get(tensorValues);
+
+                    if (featureDimension == DFL_DIMENSION) {
+                        boundingBoxMap.put(anchorCount, tensorValues);
+                    } else {
+                        classScoreMap.put(anchorCount, tensorValues);
+                        channelDimensionMap.put(anchorCount, featureDimension);
+                    }
                 }
             }
             
             return processModelOutputs(
-                    classScoreMap, boundingBoxMap, channelDimensionMap, 
-                    originalWidth, originalHeight, resizeScale, 
+                    classScoreMap, boundingBoxMap, channelDimensionMap,
+                    originalWidth, originalHeight, scaleX, scaleY,
                     scoreThreshold, targetWidth, targetHeight
             );
         }
@@ -254,19 +261,54 @@ public class LayoutService {
     // ========================================================================
     // 비공개 메서드 - 후처리 (Post-processing & NMS)
     // ========================================================================
+    private List<LayoutRegion> processPostProcessedOutput(
+            float[] data, int numDets, int originalWidth, int originalHeight,
+            float scaleX, float scaleY, float scoreThreshold) {
+
+        List<LayoutRegion> candidateRegions = new ArrayList<>();
+        float expansionMargin = this.appProperties.models().layoutExpansionMargin();
+
+        for (int i = 0; i < numDets; i++) {
+            int offset = i * 6;
+            float x1 = data[offset];
+            float y1 = data[offset + 1];
+            float x2 = data[offset + 2];
+            float y2 = data[offset + 3];
+            float score = data[offset + 4];
+            int classIdx = (int) data[offset + 5];
+
+            if (score < scoreThreshold || classIdx < 0) {
+                continue;
+            }
+
+            // 모델 좌표를 원본 이미지 해상도로 복원
+            double realX1 = Math.max(0, x1 / scaleX);
+            double realY1 = Math.max(0, y1 / scaleY);
+            double realX2 = Math.min(originalWidth, x2 / scaleX);
+            double realY2 = Math.min(originalHeight, y2 / scaleY);
+
+            Rectangle boundingBox = buildPaddedRectangle(realX1, realY1, realX2, realY2, expansionMargin, originalWidth, originalHeight);
+            String labelName = (classIdx < this.classLabels.size()) ? this.classLabels.get(classIdx) : String.valueOf(classIdx);
+
+            candidateRegions.add(new LayoutRegion(labelName, boundingBox, score));
+        }
+
+        return applyNonMaximumSuppression(candidateRegions, this.appProperties.models().layoutNmsThreshold());
+    }
 
     private List<LayoutRegion> processModelOutputs(
-            Map<Integer, float[]> classScoreMap, 
+            Map<Integer, float[]> classScoreMap,
             Map<Integer, float[]> boundingBoxMap,
-            Map<Integer, Integer> channelDimensionMap, 
-            int originalWidth, 
-            int originalHeight, 
-            double resizeScale, 
-            float scoreThreshold, 
-            int targetWidth, 
+            Map<Integer, Integer> channelDimensionMap,
+            int originalWidth,
+            int originalHeight,
+            float scaleX,
+            float scaleY,
+            float scoreThreshold,
+            int targetWidth,
             int targetHeight) {
-                
-        List<LayoutRegion> candidateRegions = new ArrayList<>();
+
+        List<LayoutRegion> allCandidates = new ArrayList<>();
         float expansionMargin = this.appProperties.models().layoutExpansionMargin();
 
         for (int stride : FEATURE_MAP_STRIDES) {
@@ -284,25 +326,29 @@ public class LayoutService {
 
             for (int anchorIndex = 0; anchorIndex < totalAnchors; anchorIndex++) {
                 decodeSingleAnchor(
-                        anchorIndex, numClasses, anchorScores, scoreThreshold, 
-                        gridWidth, stride, anchorBoxes, resizeScale, 
-                        originalWidth, originalHeight, expansionMargin, candidateRegions
+                        anchorIndex, numClasses, anchorScores, scoreThreshold,
+                        gridWidth, stride, anchorBoxes, scaleX, scaleY,
+                        originalWidth, originalHeight, expansionMargin, allCandidates
                 );
             }
         }
-        
-        return applyNonMaximumSuppression(candidateRegions, this.appProperties.models().layoutNmsThreshold());
+
+        // 상위 1000개 후보군 유지 후 NMS 적용
+        allCandidates.sort(Comparator.comparingDouble(LayoutRegion::score).reversed());
+        List<LayoutRegion> topCandidates = allCandidates.stream().limit(1000).toList();
+
+        return applyNonMaximumSuppression(topCandidates, this.appProperties.models().layoutNmsThreshold());
     }
 
     private void decodeSingleAnchor(
-            int anchorIndex, int numClasses, float[] anchorScores, float scoreThreshold, 
-            int gridWidth, int stride, float[] anchorBoxes, double resizeScale, 
-            int originalWidth, int originalHeight, float expansionMargin, 
+            int anchorIndex, int numClasses, float[] anchorScores, float scoreThreshold,
+            int gridWidth, int stride, float[] anchorBoxes, float scaleX, float scaleY,
+            int originalWidth, int originalHeight, float expansionMargin,
             List<LayoutRegion> candidateRegions) {
                 
         int bestClassIndex = -1;
-        float maxScore = -1.0f;
-        
+        float maxScore = -Float.MAX_VALUE;
+
         for (int classIdx = 0; classIdx < numClasses; classIdx++) {
             float score = anchorScores[anchorIndex * numClasses + classIdx];
             if (score > maxScore) {
@@ -310,8 +356,9 @@ public class LayoutService {
                 bestClassIndex = classIdx;
             }
         }
-        
-        if (maxScore < scoreThreshold) {
+
+        float finalScore = maxScore;
+        if (finalScore < scoreThreshold) {
             return;
         }
 
@@ -319,21 +366,24 @@ public class LayoutService {
         float gridY = anchorIndex / gridWidth;
         float centerX = (gridX + ANCHOR_CENTER_OFFSET) * stride;
         float centerY = (gridY + ANCHOR_CENTER_OFFSET) * stride;
-        
+
+        // Distribution Focal Loss 복호화
         float[] boxDistances = decodeDistributionFocalLoss(anchorBoxes, anchorIndex, stride);
 
-        double x1 = Math.max(0, (centerX - boxDistances[0]) / resizeScale);
-        double y1 = Math.max(0, (centerY - boxDistances[1]) / resizeScale);
-        double x2 = Math.min(originalWidth, (centerX + boxDistances[2]) / resizeScale);
-        double y2 = Math.min(originalHeight, (centerY + boxDistances[3]) / resizeScale);
+        // 중심점 기준으로 경계면 좌표 산출 및 스케일 복원
+        double x1 = Math.max(0, (centerX - boxDistances[0]) / scaleX);
+        double y1 = Math.max(0, (centerY - boxDistances[1]) / scaleY);
+        double x2 = Math.min(originalWidth, (centerX + boxDistances[2]) / scaleX);
+        double y2 = Math.min(originalHeight, (centerY + boxDistances[3]) / scaleY);
 
         Rectangle boundingBox = buildPaddedRectangle(x1, y1, x2, y2, expansionMargin, originalWidth, originalHeight);
         
         if (boundingBox.width > 0 && boundingBox.height > 0) {
-            String labelName = (bestClassIndex < this.classLabels.size()) 
-                    ? this.classLabels.get(bestClassIndex) 
+            String labelName = (bestClassIndex < this.classLabels.size())
+                    ? this.classLabels.get(bestClassIndex)
                     : String.valueOf(bestClassIndex);
-            candidateRegions.add(new LayoutRegion(labelName, boundingBox, maxScore));
+
+            candidateRegions.add(new LayoutRegion(labelName, boundingBox, finalScore));
         }
     }
 
@@ -379,26 +429,36 @@ public class LayoutService {
         if (regions.isEmpty()) {
             return regions;
         }
-        
-        regions.sort(Comparator.comparingDouble(LayoutRegion::score).reversed());
-        
+
+        // 클래스별로 그룹화하여 독립적으로 NMS 수행
+        Map<String, List<LayoutRegion>> regionsByClass = new HashMap<>();
+        for (LayoutRegion region : regions) {
+            regionsByClass.computeIfAbsent(region.type(), k -> new ArrayList<>()).add(region);
+        }
+
         List<LayoutRegion> finalRegions = new ArrayList<>();
-        boolean[] isSuppressed = new boolean[regions.size()];
-        
-        for (int i = 0; i < regions.size(); i++) {
-            if (isSuppressed[i]) {
-                continue;
-            }
-            
-            LayoutRegion currentRegion = regions.get(i);
-            finalRegions.add(currentRegion);
-            
-            for (int j = i + 1; j < regions.size(); j++) {
-                if (!isSuppressed[j] && calculateIntersectionOverUnion(currentRegion.rect(), regions.get(j).rect()) > iouThreshold) {
-                    isSuppressed[j] = true;
+
+        for (List<LayoutRegion> classRegions : regionsByClass.values()) {
+            classRegions.sort(Comparator.comparingDouble(LayoutRegion::score).reversed());
+
+            boolean[] isSuppressed = new boolean[classRegions.size()];
+            for (int i = 0; i < classRegions.size(); i++) {
+                if (isSuppressed[i]) {
+                    continue;
+                }
+
+                LayoutRegion current = classRegions.get(i);
+                finalRegions.add(current);
+
+                for (int j = i + 1; j < classRegions.size(); j++) {
+                    if (!isSuppressed[j] && calculateIntersectionOverUnion(current.rect(), classRegions.get(j).rect()) > iouThreshold) {
+                        isSuppressed[j] = true;
+                    }
                 }
             }
         }
+
+        finalRegions.sort(Comparator.comparingDouble(LayoutRegion::score).reversed());
         return finalRegions;
     }
 
