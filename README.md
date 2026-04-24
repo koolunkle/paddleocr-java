@@ -84,4 +84,5 @@ The project includes unit and integration tests covering core algorithms and API
 ```
 
 ## License
-This project is licensed under the MIT License.
+This project is distributed under the Apache License 2.0. 
+For details, see the [LICENSE](LICENSE) file.
