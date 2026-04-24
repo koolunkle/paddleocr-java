@@ -12,6 +12,7 @@ import org.springframework.stereotype.Component;
 import com.example.ocr.constant.AppConstants;
 import com.example.ocr.service.LayoutService;
 import com.example.ocr.service.ModelService;
+import com.example.ocr.service.TableService;
 
 import io.github.mymonstercat.Model;
 
@@ -31,14 +32,20 @@ public class AppInitializer {
     
     private final ModelService modelService;
     private final LayoutService layoutService;
+    private final TableService tableService;
 
     // ========================================================================
     // 생성자 
     // ========================================================================
 
-    public AppInitializer(ModelService modelService, LayoutService layoutService) {
+    public AppInitializer(
+            ModelService modelService,
+            LayoutService layoutService,
+            TableService tableService) {
+
         this.modelService = modelService;
         this.layoutService = layoutService;
+        this.tableService = tableService;
     }
 
     // ========================================================================
@@ -49,15 +56,18 @@ public class AppInitializer {
      * ApplicationReadyEvent를 수신하여 코어 컴포넌트 초기화를 시작합니다.
      */
     @EventListener(ApplicationReadyEvent.class)
-    public void initializeApplication() {
+    public void onApplicationReady() {
         try {
             log.info("Initializing core AI components...");
 
             // 1. ONNX 모델 파일들을 임시 디렉토리로 추출하고 루트 경로 반환
-            Path modelRootDirectory = this.modelService.prepare(Model.ONNX_PPOCR_V4);
-            
-            // 2. 추출된 경로를 바탕으로 레이아웃 탐지 서비스 초기화
-            initializeLayoutService(modelRootDirectory);
+            Path modelRoot = this.modelService.prepare(Model.ONNX_PPOCR_V4);
+
+            // 2. 레이아웃 탐지 서비스 초기화
+            initLayoutService(modelRoot);
+
+            // 3. 표 구조 분석 서비스 초기화
+            initTableService(modelRoot);
 
             log.info("Core components initialization complete");
         } catch (Exception e) {
@@ -70,24 +80,42 @@ public class AppInitializer {
     // ========================================================================
 
     /**
-     * 지정된 모델 루트 경로에서 레이아웃 모델과 사전 파일을 찾아 LayoutService를 초기화합니다.
+     * 레이아웃 탐지 모델과 사전 파일을 로드하여 LayoutService를 초기화합니다.
      */
-    private void initializeLayoutService(Path modelRootDirectory) {
+    private void initLayoutService(Path modelRoot) {
+        Path modelPath = modelRoot.resolve(AppConstants.Model.LAYOUT_MODEL);
+        Path dictPath = modelRoot.resolve(AppConstants.Model.LAYOUT_DICT);
+
+        if (!Files.exists(modelPath) || !Files.exists(dictPath)) {
+            log.warn("Skipping LayoutService init: required files not found");
+            return;
+        }
+
         try {
-            Path layoutModelPath = modelRootDirectory.resolve(AppConstants.Model.LAYOUT_MODEL);
-            Path layoutDictionaryPath = modelRootDirectory.resolve(AppConstants.Model.LAYOUT_DICT);
-
-            // 파일이 하나라도 존재하지 않으면 초기화를 건너뛰도록 Early Return 적용
-            if (!Files.exists(layoutModelPath) || !Files.exists(layoutDictionaryPath)) {
-                log.warn("Layout service initialization skipped: missing required files");
-                return;
-            }
-
-            // 파일이 정상적으로 존재하면 초기화 수행
-            this.layoutService.init(layoutModelPath.toString(), Files.readAllLines(layoutDictionaryPath));
-            log.info("Layout service initialized successfully");
+            this.layoutService.init(modelPath.toString(), Files.readAllLines(dictPath));
+            log.info("LayoutService has been initialized");
         } catch (Exception e) {
-            log.error("Failed to initialize layout service: {}", e.getMessage(), e);
+            log.error("LayoutService initialization failed: {}", e.getMessage());
+        }
+    }
+
+    /**
+     * 표 구조 분석 모델과 사전 파일을 로드하여 TableService를 초기화합니다.
+     */
+    private void initTableService(Path modelRoot) {
+        Path modelPath = modelRoot.resolve(AppConstants.Model.SLANET_MODEL);
+        String dictResourcePath = AppConstants.Model.ONNX_PATH + AppConstants.Model.TABLE_DICT;
+
+        if (!Files.exists(modelPath)) {
+            log.warn("Skipping TableService init: model file not found");
+            return;
+        }
+
+        try {
+            this.tableService.init(modelPath.toString(), dictResourcePath);
+            log.info("TableService has been initialized");
+        } catch (Exception e) {
+            log.error("TableService initialization failed: {}", e.getMessage());
         }
     }
 }

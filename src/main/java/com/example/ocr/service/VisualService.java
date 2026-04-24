@@ -10,6 +10,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
 import org.opencv.core.Core;
@@ -29,7 +30,8 @@ import com.example.ocr.constant.AppConstants;
 import com.example.ocr.domain.DecisionField;
 import com.example.ocr.domain.LayoutType;
 import com.example.ocr.domain.Visualizable;
-import com.example.ocr.support.MatResourceWrapper; 
+import com.example.ocr.dto.PageData;
+import com.example.ocr.support.MatResourceWrapper;
 
 /**
  * OCR 분석 결과(영역, 레이아웃, 신뢰도 등)를 원본 이미지 위에 시각화하여 
@@ -59,6 +61,9 @@ public class VisualService {
     /** 디버그 출력 디렉토리 및 파일명 패턴 */
     private static final String DIR_DECISION = "decision";
     private static final String DIR_LAYOUT = "layout";
+    private static final String DIR_TABLE = "table";
+
+    /** 디버그 이미지 파일명 패턴 */
     private static final String FILE_DECISION_PATTERN = "decision_p%03d" + AppConstants.EXT_PNG;
     private static final String FILE_LAYOUT_PATTERN = "layout_p%03d" + AppConstants.EXT_PNG;
 
@@ -105,8 +110,8 @@ public class VisualService {
         try {
             Path rootPath = Paths.get(this.appProperties.algorithm().debugOutputDir(), sanitizedDocumentName);
             deleteDirectoryRecursively(rootPath);
-            createDirectories(rootPath.resolve(DIR_DECISION), rootPath.resolve(DIR_LAYOUT));
-            
+            createDirectories(rootPath.resolve(DIR_DECISION), rootPath.resolve(DIR_LAYOUT), rootPath.resolve(DIR_TABLE));
+
             this.lastCleanupTimeMap.put(sanitizedDocumentName, currentTime);
         } catch (Exception e) {
             log.warn("Failed to cleanup debug directory for: {}", documentName, e);
@@ -163,9 +168,76 @@ public class VisualService {
         }
     }
 
+    /**
+     * 추출된 표 구조를 HTML 파일로 변환하여 저장합니다.
+     */
+    public void saveTableHtml(int pageNumber, int tableIndex, String documentName, PageData.TableStructure structure) {
+        if (structure == null) {
+            return;
+        }
+
+        StringBuilder html = new StringBuilder();
+        html.append("<!DOCTYPE html><html><head><meta charset='UTF-8'>");
+        html.append("<style>table { border-collapse: collapse; width: 100%; } td, th { border: 1px solid black; padding: 8px; text-align: left; }</style>");
+        html.append("</head><body><table>");
+
+        // 1. 헤더 영역 생성
+        if (structure.header() != null && !structure.header().isEmpty()) {
+            html.append("<thead>");
+            Map<Integer, List<PageData.Cell>> headerRows = structure.header().stream()
+                    .collect(Collectors.groupingBy(PageData.Cell::row, java.util.TreeMap::new, Collectors.toList()));
+
+            for (List<PageData.Cell> rowCells : headerRows.values()) {
+                html.append("<tr>");
+                rowCells.sort(Comparator.comparingInt(PageData.Cell::col));
+                for (PageData.Cell cell : rowCells) {
+                    appendCellHtml(html, "th", cell);
+                }
+                html.append("</tr>");
+            }
+            html.append("</thead>");
+        }
+
+        // 2. 바디 영역 생성
+        html.append("<tbody>");
+        for (PageData.Row row : structure.rows()) {
+            html.append("<tr>");
+            for (PageData.Cell cell : row.cells()) {
+                appendCellHtml(html, "td", cell);
+            }
+            html.append("</tr>");
+        }
+        html.append("</tbody></table></body></html>");
+
+        // 3. 파일 저장
+        try {
+            String fileName = String.format("table_p%03d_%02d.html", pageNumber, tableIndex);
+            Path savePath = Paths.get(this.appProperties.algorithm().debugOutputDir(), sanitizeFileName(documentName), DIR_TABLE, fileName);
+            Files.createDirectories(savePath.getParent());
+            Files.writeString(savePath, html.toString());
+        } catch (IOException e) {
+            log.error("Failed to save table HTML file", e);
+        }
+    }
+
+
     // ========================================================================
     // 비공개 메서드 - OpenCV 시각화
     // ========================================================================
+
+    /**
+     * HTML 셀(td/th) 태그 및 속성을 생성합니다.
+     */
+    private void appendCellHtml(StringBuilder html, String tag, PageData.Cell cell) {
+        html.append("<").append(tag);
+        if (cell.colspan() != null && cell.colspan() > 1) {
+            html.append(" colspan='").append(cell.colspan()).append("'");
+        }
+        if (cell.rowspan() != null && cell.rowspan() > 1) {
+            html.append(" rowspan='").append(cell.rowspan()).append("'");
+        }
+        html.append(">").append(cell.text()).append("</").append(tag).append(">");
+    }
 
     /**
      * 테두리가 있는 반투명한 사각형 박스를 그립니다.

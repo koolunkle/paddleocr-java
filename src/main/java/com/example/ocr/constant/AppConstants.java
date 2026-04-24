@@ -41,12 +41,26 @@ public final class AppConstants {
     // ========================================================================
 
     public static final class Model {
-        private Model() {}
-        
-        public static final String ONNX_PATH    = "models/onnx/";
+        private Model() {
+        }
+
+        /** ONNX 모델 파일이 저장된 기본 경로 */
+        public static final String ONNX_PATH = "models/onnx/";
+
+        /** 레이아웃 분석용 모델 파일명 */
         public static final String LAYOUT_MODEL = "layout_cdla.onnx";
-        public static final String LAYOUT_DICT  = "layout_dict.txt";
-        public static final String[] REQUIRED   = {LAYOUT_MODEL, LAYOUT_DICT};
+
+        /** 레이아웃 타입 사전 파일명 */
+        public static final String LAYOUT_DICT = "layout_dict.txt";
+
+        /** SLANet 표 구조 분석 모델 파일명 */
+        public static final String SLANET_MODEL = "slanet-plus.onnx";
+
+        /** 표 구조 분석용 사전 파일명 */
+        public static final String TABLE_DICT = "table_structure_dict_ch.txt";
+
+        /** 초기 구동 시 필수 체크 모델 자원 목록 */
+        public static final List<String> REQUIRED = List.of(LAYOUT_MODEL, LAYOUT_DICT, SLANET_MODEL, TABLE_DICT);
     }
 
     // ========================================================================

@@ -7,6 +7,9 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
 import java.util.Arrays;
+import java.util.List;
+import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
@@ -25,30 +28,48 @@ public class ModelService {
 
     private static final Logger log = LoggerFactory.getLogger(ModelService.class);
 
+    /** 중복 추출 방지를 위해 이미 준비된 모델의 루트 경로를 저장하는 캐시 맵 */
+    private final Map<Model, Path> preparedModels = new ConcurrentHashMap<>();
+
+
     // ========================================================================
     // 공개 메서드
     // ========================================================================
 
     /**
-     * 모델 추론 엔진이 사용할 수 있도록 클래스패스 내장 모델 파일들을 로컬 파일 시스템(임시 폴더)으로 추출하여 준비합니다.
+     * 클래스패스에 내장된 모델 파일들을 로컬 임시 디렉토리로 추출하여 준비합니다.
+     * 이미 추출된 모델의 경우 캐시된 경로를 즉시 반환하여 중복 작업을 방지합니다.
      *
      * @param model 준비할 AI 모델 정보 객체
-     * @return 모델 파일들이 추출된 임시 디렉토리의 루트 경로
-     * @throws IOException 임시 디렉토리 생성 실패 시 발생
+     * @return 모델 파일들이 추출된 로컬 디렉토리 경로
+     * @throws IOException 디렉토리 생성 또는 파일 복사 실패 시 발생
      */
     public Path prepare(Model model) throws IOException {
-        Path targetDirectory = Path.of(model.getTempDirPath()).toAbsolutePath();
+        try {
+            return preparedModels.computeIfAbsent(model, m -> {
+                try {
+                    Path targetDirectory = Path.of(m.getTempDirPath()).toAbsolutePath();
+                    Files.createDirectories(targetDirectory);
 
-        Files.createDirectories(targetDirectory);
+                    // 1. 모델 전용 파일 추출 (예: .onnx 파일, 라벨 텍스트 등)
+                    String modelResourcePrefix = m.getModelsDir() + "/";
+                    extractFiles(modelResourcePrefix, targetDirectory, Arrays.asList(m.getModelFileArray()));
 
-        // 1. 모델 전용 파일 추출 (예: .onnx 파일, 라벨 텍스트 등)
-        String modelResourcePrefix = model.getModelsDir() + "/";
-        extractFiles(modelResourcePrefix, targetDirectory, model.getModelFileArray());
+                    // 2. OCR 엔진 구동에 공통으로 필요한 필수 파일 추출
+                    extractFiles(AppConstants.Model.ONNX_PATH, targetDirectory, AppConstants.Model.REQUIRED);
 
-        // 2. OCR 엔진 구동에 공통으로 필요한 필수 파일 추출
-        extractFiles(AppConstants.Model.ONNX_PATH, targetDirectory, AppConstants.Model.REQUIRED);
-
-        return targetDirectory;
+                    log.info("Model resource prepared at: {}", targetDirectory);
+                    return targetDirectory;
+                } catch (IOException e) {
+                    throw new RuntimeException(e);
+                }
+            });
+        } catch (RuntimeException e) {
+            if (e.getCause() instanceof IOException) {
+                throw (IOException) e.getCause();
+            }
+            throw e;
+        }
     }
 
     // ========================================================================
@@ -56,15 +77,20 @@ public class ModelService {
     // ========================================================================
 
     /**
-     * 지정된 파일 목록을 클래스패스에서 읽어 로컬 타겟 디렉토리로 복사(추출)합니다.
+     * 지정된 파일 목록을 클래스패스에서 읽어 로컬 타겟 디렉토리로 복사(추출)합니다.W
      */
-    private void extractFiles(String classpathPrefix, Path targetDirectory, String[] fileNames) {
-        Arrays.stream(fileNames).filter(fileName -> fileName != null && !fileName.isEmpty())
+    private void extractFiles(String classpathPrefix, Path targetDirectory, List<String> fileNames) {
+        if (fileNames == null) {
+            return;
+        }
+
+        fileNames.stream()
+                .filter(fileName -> fileName != null && !fileName.isEmpty())
                 .forEach(fileName -> {
                     try {
                         Path targetFilePath = targetDirectory.resolve(fileName);
 
-                        // 이미 존재하고 덮어쓸 필요가 없는 무거운 파일은 건너뜀
+                        // 무거운 바이너리 파일의 중복 복사를 방지하기 위한 건너뛰기 검사
                         if (shouldSkipExtraction(targetFilePath, fileName)) {
                             return;
                         }

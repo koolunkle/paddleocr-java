@@ -9,13 +9,16 @@ import java.nio.file.Files;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Comparator;
+import java.util.HashMap;
 import java.util.IntSummaryStatistics;
 import java.util.List;
+import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.concurrent.Semaphore;
 import java.util.concurrent.TimeUnit;
 import java.util.function.Consumer;
+import java.util.stream.Collectors;
 import java.util.stream.IntStream;
 
 import javax.imageio.ImageIO;
@@ -23,7 +26,11 @@ import javax.imageio.ImageReader;
 import javax.imageio.stream.ImageInputStream;
 import org.opencv.core.CvType;
 import org.opencv.core.Mat;
+import org.opencv.core.Rect;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
+
 import com.benjaminwan.ocrlibrary.OcrResult;
 import com.benjaminwan.ocrlibrary.Point;
 import com.benjaminwan.ocrlibrary.TextBlock;
@@ -39,20 +46,23 @@ import com.example.ocr.parser.TableStructureEstimator;
 import com.example.ocr.support.MatResourceWrapper;
 import com.example.ocr.support.ResultLogger;
 import com.example.ocr.util.TextUtil;
+
 import io.github.mymonstercat.ocr.InferenceEngine;
 import io.github.mymonstercat.ocr.config.ParamConfig;
 
 /**
- * OCR, 레이아웃 분석 및 데이터 가공을 조율하는 통합 처리 서비스
+ * OCR, 레이아웃 및 테이블 분석 그리고 데이터 가공을 조율하는 통합 처리 서비스
  * 이미지 파싱부터 최종 분석 결과 도출까지의 전체 파이프라인을 관리합니다.
  */
 @Service
 public class ProcessorService {
 
     // ========================================================================
-    // 상수 
+    // 상수 및 로거
     // ========================================================================
 
+    private static final Logger log = LoggerFactory.getLogger(ProcessorService.class);
+    
     private static final String PAGE_PREFIX = "ocr_p";
 
     // ========================================================================
@@ -67,7 +77,7 @@ public class ProcessorService {
     private final ResultLogger resultLogger;
     private final VisualService visualService;
     private final LayoutService layoutService;
-    
+    private final TableService tableService;
     private final Semaphore concurrencyLimitSemaphore;
 
     // ========================================================================
@@ -97,7 +107,8 @@ public class ProcessorService {
             InferenceEngine inferenceEngine, 
             ResultLogger resultLogger, 
             VisualService visualService,
-            LayoutService layoutService) {
+            LayoutService layoutService,
+            TableService tableService) {
         
         this.decisionParser = decisionParser;
         this.tableStructureEstimator = tableStructureEstimator;
@@ -107,6 +118,7 @@ public class ProcessorService {
         this.resultLogger = resultLogger;
         this.visualService = visualService;
         this.layoutService = layoutService;
+        this.tableService = tableService;
         this.concurrencyLimitSemaphore = new Semaphore(appProperties.async().corePoolSize());
     }
 
@@ -218,8 +230,103 @@ public class ProcessorService {
     }
 
     /**
-     * 탐지된 레이아웃 박스를 실제 포함된 OCR 텍스트 블록들의 영역으로 정밀 보정
+     * SLANet 모델 결과를 바탕으로 표 구조를 분석하고 텍스트를 정밀 매핑합니다.
      */
+    private PageData.TableStructure analyzeTable(Mat imageMat, Rectangle tableRect, List<TextBlock> allTextBlocks) {
+        try (MatResourceWrapper wrapper = new MatResourceWrapper()) {
+            // 1. 모델 분석 실행
+            Rect cropRect = new Rect(tableRect.x, tableRect.y, tableRect.width, tableRect.height);
+            Mat tableMat = wrapper.add(new Mat(imageMat, cropRect));
+            PageData.TableStructure structure = this.tableService.analyze(tableMat);
+
+            if (structure == null) {
+                return null;
+            }
+
+            // 2. 표 내부 텍스트 블록 수집
+            List<TextBlock> tableBlocks = allTextBlocks.stream()
+                    .filter(block -> tableRect.contains(calculateCenterPoint(block.getBoxPoint())))
+                    .sorted(this::compareTextBlockPosition)
+                    .toList();
+
+            // 3. 셀-텍스트 정밀 매핑
+            List<PageData.Cell> allCells = new ArrayList<>();
+            if (structure.header() != null) {
+                allCells.addAll(structure.header());
+            }
+            structure.rows().forEach(row -> allCells.addAll(row.cells()));
+
+            Map<PageData.Cell, List<TextBlock>> cellToBlocks = new HashMap<>();
+            for (TextBlock block : tableBlocks) {
+                Rectangle blockRect = convertToAwtRectangle(block);
+                double blockArea = (double) blockRect.width * blockRect.height;
+
+                PageData.Cell bestCell = null;
+                double bestIou = -1.0;
+                double bestDistance = Double.MAX_VALUE;
+
+                for (PageData.Cell cell : allCells) {
+                    Rectangle absCellRect = new Rectangle(
+                            tableRect.x + cell.rect().x(),
+                            tableRect.y + cell.rect().y(),
+                            cell.rect().width(),
+                            cell.rect().height()
+                    );
+
+                    Rectangle intersection = absCellRect.intersection(blockRect);
+                    double iou = 0.0;
+                    if (intersection.width > 0 && intersection.height > 0) {
+                        double intersectArea = intersection.width * intersection.height;
+                        double cellArea = absCellRect.width * absCellRect.height;
+                        iou = intersectArea / (blockArea + cellArea - intersectArea);
+                    }
+
+                    // 기하학적 일치도(IoU)와 중심점 간의 거리(L1 Distance)를 조합하여 텍스트 블록에 가장 적합한 셀을 탐색합니다.
+                    double distance = Math.abs(absCellRect.getMinX() - blockRect.getMinX())
+                            + Math.abs(absCellRect.getMinY() - blockRect.getMinY())
+                            + Math.abs(absCellRect.getMaxX() - blockRect.getMaxX())
+                            + Math.abs(absCellRect.getMaxY() - blockRect.getMaxY())
+                            + Math.min(
+                                    Math.abs(absCellRect.getMinX() - blockRect.getMinX())
+                                            + Math.abs(absCellRect.getMinY() - blockRect.getMinY()),
+                                    Math.abs(absCellRect.getMaxX() - blockRect.getMaxX())
+                                            + Math.abs(absCellRect.getMaxY() - blockRect.getMaxY()));
+
+                    // 높은 IoU를 우선하되, IoU가 동일할 경우 물리적 거리가 더 가까운 셀을 선택합니다.
+                    if (iou > bestIou || (iou == bestIou && distance < bestDistance)) {
+                        bestIou = iou;
+                        bestDistance = distance;
+                        bestCell = cell;
+                    }
+                }
+
+                // 유의미한 겹침이 발생한 경우에만 해당 셀에 텍스트 블록을 할당합니다.
+                if (bestCell != null && bestIou >= 1e-8) {
+                    cellToBlocks.computeIfAbsent(bestCell, k -> new ArrayList<>()).add(block);
+                }
+            }
+
+            // 4. 셀 텍스트 업데이트
+            List<PageData.Cell> updatedHeader = null;
+            if (structure.header() != null) {
+                updatedHeader = structure.header().stream()
+                        .map(cell -> buildUpdatedCell(cell, cellToBlocks.get(cell)))
+                        .toList();
+            }
+
+            List<PageData.Row> updatedRows = structure.rows().stream()
+                    .map(row -> new PageData.Row(row.cells().stream()
+                            .map(cell -> buildUpdatedCell(cell, cellToBlocks.get(cell)))
+                            .toList()))
+                    .toList();
+
+            return new PageData.TableStructure(updatedHeader, updatedRows);
+        } catch (Exception e) {
+            log.error("Table analysis failed", e);
+            return null;
+        }
+    }
+
     private List<LayoutService.LayoutRegion> adjustLayoutRegions(List<LayoutService.LayoutRegion> regions, List<TextBlock> textBlocks, int imgWidth, int imgHeight) {
         if (textBlocks == null || textBlocks.isEmpty()) {
             return Collections.emptyList();
@@ -313,14 +420,16 @@ public class ProcessorService {
                         return new AnalysisResponse.PageResult(pageNumber, AnalysisResponse.Type.DECISION, new PageData.Decision(decisionData.data()));
                     })
                     // 2. 특정 템플릿이 아니면 일반 분석(Raw) 결과로 반환
-                    .orElseGet(() -> buildRawResult(pageNumber, validBlocks, layoutRegions));
+                    .orElseGet(() -> buildRawResult(pageNumber, validBlocks, layoutRegions, imageMat, documentName));
         }
     }
 
     /**
      * 일반적인 문서 구조를 가진 페이지의 분석 결과 생성 (표 구조 추정 포함)
      */
-    private AnalysisResponse.PageResult buildRawResult(int pageNumber, List<TextBlock> textBlocks, List<LayoutService.LayoutRegion> layoutRegions) {
+     private AnalysisResponse.PageResult buildRawResult(int pageNumber, List<TextBlock> textBlocks, List<LayoutService.LayoutRegion> layoutRegions, Mat imageMat, String documentName) {
+        final int[] tableCounter = {0};
+
         List<PageData.Region> parsedRegions = layoutRegions.stream().map(layoutRegion -> {
             // 해당 영역 내에 중심점이 포함된 텍스트 블록 중 유효한 것만 필터링
             List<TextBlock> innerBlocks = textBlocks.stream()
@@ -338,13 +447,35 @@ public class ProcessorService {
             PageData.TableStructure tableStructure = null;
 
             if (LayoutType.fromCode(layoutRegion.type()).isTable()) {
-                tableStructure = this.tableStructureEstimator.estimate(innerBlocks);
+                // 표 구조 분석 수행 
+                tableStructure = analyzeTable(imageMat, layoutRegion.rect(), textBlocks);
+
+                // 표 구조 분석 결과가 아예 없는 경우, 폴백 적용
+                if (tableStructure == null || (tableStructure.rows().isEmpty() && (tableStructure.header() == null || tableStructure.header().isEmpty()))) {
+                    tableStructure = this.tableStructureEstimator.estimate(innerBlocks);
+                } else {
+                    this.visualService.saveTableHtml(pageNumber, ++tableCounter[0], documentName, tableStructure);
+                }
             }
 
             return new PageData.Region(layoutRegion.type(), layoutRegion.score(), convertToDomainRect(layoutRegion.rect()), textLines, tableStructure);
         }).toList();
 
         return new AnalysisResponse.PageResult(pageNumber, AnalysisResponse.Type.RAW, new PageData.Raw(parsedRegions, null));
+    }
+
+    /**
+     * 셀 영역에 매핑된 텍스트 블록들을 결합하여 셀 데이터를 업데이트합니다.
+     */
+    private PageData.Cell buildUpdatedCell(PageData.Cell cell, List<TextBlock> blocks) {
+        if (blocks == null || blocks.isEmpty()) {
+            return new PageData.Cell("", cell.row(), cell.col(), cell.colspan(), cell.rowspan(), cell.rect());
+        }
+        String text = blocks.stream()
+                .sorted(this::compareTextBlockPosition)
+                .map(block -> TextUtil.sanitize(block.getText()))
+                .collect(Collectors.joining(" ")).trim();
+        return new PageData.Cell(text, cell.row(), cell.col(), cell.colspan(), cell.rowspan(), cell.rect());
     }
 
     // ========================================================================

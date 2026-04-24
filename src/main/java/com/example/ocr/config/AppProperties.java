@@ -149,17 +149,23 @@ public record AppProperties(
     // ========================================================================
 
     /**
-     * 레이아웃 등 특정 딥러닝 모델의 전처리 및 후처리에 필요한 파라미터
+     * 레이아웃, 테이블 등 특정 딥러닝 모델의 전처리 및 후처리에 필요한 파라미터
      */
     public record Models(
             
             @DefaultValue("800") @Positive 
             int layoutTargetHeight,
-            
-            @DefaultValue("608") @Positive 
-            int layoutTargetWidth, 
-            
-            @DefaultValue({"0.485", "0.456", "0.406"}) @NotEmpty 
+
+            /** 레이아웃 모델 입력 타겟 너비 */
+            @DefaultValue("608") @Positive
+            int layoutTargetWidth,
+
+            /** 표 구조 분석 모델 입력 타겟 크기 */
+            @DefaultValue("488") @Positive
+            int tableTargetSize,
+
+            /** ImageNet 표준 평균값 (Normalization용) */
+            @DefaultValue({"0.485", "0.456", "0.406"}) @NotEmpty
             List<Float> imagenetMean,
             
             @DefaultValue({"0.229", "0.224", "0.225"}) @NotEmpty 
